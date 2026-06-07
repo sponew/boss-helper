@@ -1,8 +1,6 @@
-import { ElMessage } from 'element-plus'
 import { ref } from 'vue'
 
 import { counter } from '@/message'
-import type { JobStatus } from '@/stores/jobs'
 import type {
   PipelineCache,
   PipelineCacheConfig,
@@ -11,6 +9,11 @@ import type {
 } from '@/types/pipelineCache'
 import { jsonClone } from '@/utils/deepmerge'
 import { logger } from '@/utils/logger'
+
+import { JobStatus } from './useApplying/type'
+
+const toast = useToast()
+
 // 默认处理器配置
 const DEFAULT_PROCESSOR_CONFIGS: Record<ProcessorType, { expireTime: number }> = {
   aiFiltering: { expireTime: 7 * 24 * 60 * 60 * 1000 }, // 7天
@@ -238,6 +241,9 @@ export class PipelineCacheManager {
   async clearCache(): Promise<void> {
     this.cache.value.data = {}
     await this.saveCache()
-    ElMessage.success('缓存已清空')
+    toast.add({
+      title: '缓存已清空',
+      color: 'success',
+    })
   }
 }

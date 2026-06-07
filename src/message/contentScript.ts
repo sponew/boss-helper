@@ -5,6 +5,7 @@ import type { StorageItemKey } from '#imports'
 import { browser, storage } from '#imports'
 
 import type { BackgroundCounter } from './background'
+export { ProvideContentAdapter } from './contentScriptShare'
 
 export const [, injectBackgroundCounter] = defineProxy(() => ({}) as BackgroundCounter, {
   namespace: '__boss-helper-background__',
@@ -17,28 +18,24 @@ function genKey(key: string): StorageItemKey {
 
 export class ContentCounter implements BackgroundCounter {
   public background: BackgroundCounter
+  public routerHooks: Array<(path: string) => void> = []
+
   constructor(background: BackgroundCounter) {
     this.background = background
   }
 
-  async cookieInfo(...args: Parameters<BackgroundCounter['cookieInfo']>) {
-    return this.background.cookieInfo(...args)
+  _addRouterHook(hook: (path: string) => void) {
+    this.routerHooks.push(hook)
   }
 
-  async cookieSwitch(...args: Parameters<BackgroundCounter['cookieSwitch']>) {
-    return this.background.cookieSwitch(...args)
-  }
-
-  async cookieSave(...args: Parameters<BackgroundCounter['cookieSave']>) {
-    return this.background.cookieSave(...args)
-  }
-
-  async cookieDelete(...args: Parameters<BackgroundCounter['cookieDelete']>) {
-    return this.background.cookieDelete(...args)
-  }
-
-  async cookieClear(...args: Parameters<BackgroundCounter['cookieClear']>) {
-    return this.background.cookieClear(...args)
+  async callRouterHooks(path: string) {
+    for (const hook of this.routerHooks) {
+      try {
+        void hook(path)
+      } catch (e) {
+        console.error('调用路由hook失败', e)
+      }
+    }
   }
 
   async request(...args: Parameters<BackgroundCounter['request']>) {
@@ -51,6 +48,10 @@ export class ContentCounter implements BackgroundCounter {
 
   async backgroundTest(...args: Parameters<BackgroundCounter['backgroundTest']>) {
     return this.background.backgroundTest(...args)
+  }
+
+  async fetch(...args: Parameters<typeof fetch>) {
+    return this.background.fetch(...args)
   }
 
   async storageGet<T>(key: string, defaultValue: T): Promise<T>
@@ -104,16 +105,3 @@ export const [provideContentCounter] = defineProxy(
     namespace: '__boss-helper-content__',
   },
 )
-
-export class ProvideContentAdapter implements Adapter {
-  sendMessage: SendMessage = (message) => {
-    window.parent.postMessage(message, '*')
-  }
-
-  onMessage: OnMessage = (callback) => {
-    const handler = (event: MessageEvent<Partial<Message<Record<string, any>>> | undefined>) =>
-      callback(event.data)
-    window.parent.addEventListener('message', handler)
-    return () => window.parent.removeEventListener('message', handler)
-  }
-}

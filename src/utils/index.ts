@@ -2,13 +2,17 @@ import { counter } from '@/message'
 
 // 通知
 export async function notification(
-  content: string,
-  type: 'basic' | 'image' | 'list' | 'progress' = 'basic',
+  message: string,
+  options?: Pick<
+    Omit<Browser.notifications.NotificationCreateOptions, 'iconUrl' | 'message'>,
+    'type' | 'title'
+  >,
 ) {
   return counter.notify({
-    title: 'Boss直聘批量投简历',
-    message: content,
-    type,
+    ...options,
+    title: options?.title ?? 'Boss直聘批量投简历',
+    message: message,
+    type: options?.type ?? 'basic',
     iconUrl:
       'https://img.bosszhipin.com/beijin/mcs/banner/3e9d37e9effaa2b6daf43f3f03f7cb15cfcd208495d565ef66e7dff9f98764da.jpg',
   })
@@ -21,12 +25,14 @@ export function animate({
   timing,
   end,
   callId,
+  isStopped = () => false,
 }: {
   duration: number
   draw: (progress: number) => void
   timing: (timeFraction: number) => number
   callId: (id: number) => void
   end?: () => void
+  isStopped?: () => boolean
 }) {
   const start = performance.now()
 
@@ -39,7 +45,7 @@ export function animate({
 
       draw(progress)
 
-      if (timeFraction < 1) {
+      if (timeFraction < 1 && !isStopped()) {
         callId(requestAnimationFrame(animate))
       } else if (end) {
         end()
@@ -50,13 +56,25 @@ export function animate({
 let delayLoadId: number | undefined
 
 // 延迟
-export async function delay(s: number) {
-  loader({ ms: s * 1000 })
-  return new Promise((resolve) => setTimeout(resolve, s * 1000))
+export async function delay(s: number, isStopped?: () => boolean) {
+  return new Promise<void>((resolve) => {
+    loader({ ms: s * 1000, isStopped, onDone: resolve })
+    setTimeout(resolve, s * 1000)
+  })
 }
 
 // 加载进度条
-export function loader({ ms = 10000, color = '#54f98d', onDone = () => {} }) {
+export function loader({
+  ms = 10000,
+  color = '#54f98d',
+  onDone = () => {},
+  isStopped = () => false,
+}: {
+  ms?: number
+  color?: string
+  onDone?: () => void
+  isStopped?: () => boolean
+}) {
   let load = document.querySelector<HTMLDivElement>('#loader')
   if (!load) {
     const l = document.createElement('div')
@@ -82,8 +100,10 @@ export function loader({ ms = 10000, color = '#54f98d', onDone = () => {} }) {
     },
     end() {
       load.style.width = '0%'
+      delayLoadId && cancelAnimationFrame(delayLoadId)
       onDone()
     },
+    isStopped,
   })
 
   return () => {
@@ -110,4 +130,11 @@ export function getCurTime(currentDate = new Date()) {
   const minutes = String(currentDate.getMinutes() + 1).padStart(2, '0')
   const seconds = String(currentDate.getSeconds()).padStart(2, '0')
   return `${hours}:${minutes}:${seconds}`
+}
+
+export function errorHandle(e: any): string {
+  if (e instanceof Error) {
+    return e.message
+  }
+  return `${e}`
 }

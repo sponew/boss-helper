@@ -1,16 +1,13 @@
 import { defineContentScript, injectScript } from '#imports'
 import { ProvideContentAdapter, provideContentCounter } from '@/message/contentScript'
 
-import '@/main.scss'
-import 'element-plus/theme-chalk/src/message-box.scss'
-import 'element-plus/theme-chalk/src/message.scss'
+import './boss/inject.css'
 
 export default defineContentScript({
   matches: ['*://zhipin.com/*', '*://*.zhipin.com/*'],
-  async main(_ctx) {
+  async main() {
     provideContentCounter(new ProvideContentAdapter())
-
-    await injectScript('/main-world.js', {
+    await injectScript('/boss.js', {
       keepInDom: true,
     })
   },

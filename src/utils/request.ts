@@ -1,5 +1,3 @@
-import type { events } from 'fetch-event-stream'
-
 import { counter } from '@/message'
 
 import { loader } from '.'
@@ -11,8 +9,6 @@ export class RequestError extends Error {
   }
 }
 export type ResponseType = 'text' | 'json' | 'arraybuffer' | 'blob' | 'document' | 'stream'
-
-export type OnStream = (reader: ReturnType<typeof events>) => Promise<void>
 
 interface GmXhrRequest<TContext, TResponseType extends ResponseType> {
   method?: string
@@ -96,7 +92,7 @@ export type RequestArgs<TContext, TResponseType extends ResponseType> = Partial<
     GmXhrRequest<TContext, TResponseType>,
     'method' | 'url' | 'data' | 'headers' | 'timeout' | 'responseType'
   > & {
-    onStream: OnStream
+    // onStream: OnStream
     isBackground: boolean
   }
 >

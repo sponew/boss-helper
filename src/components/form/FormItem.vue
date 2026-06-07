@@ -1,6 +1,4 @@
 <script lang="ts" setup>
-import { ElCheckbox, ElFormItem, ElLink } from 'element-plus'
-
 defineProps<{
   label: string
   help?: string
@@ -14,23 +12,29 @@ const enable = defineModel<boolean>('enable', { required: true })
 </script>
 
 <template>
-  <ElFormItem :data-help="help">
+  <UFormField
+    :data-help="help"
+    :ui="{
+      container: 'max-w-3/4',
+    }"
+    :title="help"
+  >
     <template #label>
-      <ElCheckbox v-model="enable" :label size="small" />
-      <slot name="include">
-        <ElLink
+      <UFieldGroup class="flex flex-row gap-1 items-center">
+        <UCheckbox v-model="enable" :label size="sm" />
+        <UButton
+          class="pl-px"
           v-if="include != null"
-          :type="include ? 'primary' : 'warning'"
-          size="small"
+          :color="include ? 'primary' : 'warning'"
+          variant="link"
+          size="sm"
           :disabled
           @click.stop="include = !include"
         >
           {{ include ? '包含' : '排除' }}
-        </ElLink>
-      </slot>
+        </UButton>
+      </UFieldGroup>
     </template>
     <slot />
-  </ElFormItem>
+  </UFormField>
 </template>
-
-<style lang="scss" scoped></style>

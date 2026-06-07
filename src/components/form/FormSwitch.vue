@@ -1,7 +1,4 @@
 <script lang="ts" setup>
-import { ElButton, ElButtonGroup } from 'element-plus'
-
-import settingsVue from '@/components/icon/Settings.vue'
 import type { FormDataAi } from '@/types/formData'
 
 defineProps<{
@@ -19,12 +16,16 @@ defineEmits<{
 </script>
 
 <template>
-  <ElButtonGroup :type="data.enable ? 'success' : 'danger'" :data-help="help">
-    <ElButton :disabled="lock || disabled" @click="$emit('change', data)">
+  <UFieldGroup :data-help="help">
+    <UButton
+      :color="data.enable ? 'success' : 'error'"
+      :disabled="lock || disabled"
+      @click="$emit('change', data)"
+    >
       {{ label }}
-    </ElButton>
-    <ElButton :icon="settingsVue" :disabled @click="$emit('show')" />
-  </ElButtonGroup>
+    </UButton>
+    <UButton :color="data.enable ? 'success' : 'error'" :disabled @click="$emit('show')">
+      <UIcon name="i-lucide-settings" class="size-4" />
+    </UButton>
+  </UFieldGroup>
 </template>
-
-<style lang="scss" scoped></style>

@@ -1,5 +1,3 @@
-import { ElMessage } from 'element-plus'
-
 import type { TechwolfChatProtocol } from './type'
 import { AwesomeMessage } from './type'
 
@@ -56,6 +54,7 @@ export class Message {
   }
 
   send() {
+    const toast = useToast()
     if ('GeekChatCore' in window && window.GeekChatCore != null) {
       const client = window.GeekChatCore.getInstance().getClient().client
       client.send(this)
@@ -83,7 +82,10 @@ export class Message {
     //   })
     // }
     else {
-      ElMessage.error('无可用发送渠道，请等待作者修复。可暂时关闭招呼语功能')
+      toast.add({
+        title: '无可用发送渠道，请等待作者修复。可暂时关闭招呼语功能',
+        color: 'error',
+      })
     }
   }
 }

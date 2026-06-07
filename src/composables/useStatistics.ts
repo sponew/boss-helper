@@ -1,5 +1,4 @@
 import { reactiveComputed, watchThrottled } from '@vueuse/core'
-import { defineStore } from 'pinia'
 
 import { ref } from '#imports'
 import { counter } from '@/message'
@@ -11,7 +10,7 @@ import { logger } from '@/utils/logger'
 export const todayKey = 'local:web-geek-job-Today'
 export const statisticsKey = 'local:web-geek-job-Statistics'
 
-export const useStatistics = defineStore('statistics', () => {
+export const useStatistics = () => {
   const date = getCurDay()
 
   const todayData = reactiveComputed<Statistics>(() => {
@@ -19,17 +18,9 @@ export const useStatistics = defineStore('statistics', () => {
       date,
       success: 0,
       total: 0,
-      company: 0,
-      jobTitle: 0,
-      jobContent: 0,
-      hrPosition: 0,
-      salaryRange: 0,
-      companySizeRange: 0,
-      activityFilter: 0,
-      goldHunterFilter: 0,
       repeat: 0,
-      jobAddress: 0,
-      amap: 0,
+      activityFilter: 0,
+      tasks: {},
     }
     return current
   })
@@ -84,4 +75,4 @@ export const useStatistics = defineStore('statistics', () => {
     getStatistics,
     setStatistics,
   }
-})
+}

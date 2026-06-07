@@ -1,22 +1,21 @@
 <script lang="ts" setup>
-import { ElInputNumber, ElButton } from 'element-plus'
+import { type InputNumberProps } from '@nuxt/ui'
 
 const props = withDefaults(
   defineProps<{
     value: [number, number, boolean]
-
     unit: string
-
     show: boolean
-
     step?: number
-
-    width?: string
-
     controls?: boolean
+    ui?: InputNumberProps['ui']
   }>(),
   {
     controls: true,
+    ui: {
+      // @ts-ignore
+      base: 'max-w-25',
+    },
   },
 )
 
@@ -26,30 +25,29 @@ const handleToggle = () => {
 </script>
 
 <template>
-  <div style="display: flex; flex: 1; justify-content: space-between; align-items: center">
-    <ElInputNumber
+  <UFieldGroup>
+    <UInputNumber
       v-model="props.value[0]"
-      :style="`width: ${props.width || '105px'};`"
-      :controls="props.controls"
-      controls-position="right"
       :min="0"
       :step="props.step"
+      :increment="false"
+      :decrement="false"
+      :ui="props.ui"
     />
-    <span>-</span>
-    <ElInputNumber
+    <UBadge>-</UBadge>
+    <UInputNumber
       v-model="props.value[1]"
-      :style="`width: ${props.width || '105px'};`"
-      :controls="props.controls"
-      controls-position="right"
       :min="0"
       :step="props.step"
+      :increment="false"
+      :decrement="false"
+      :ui="props.ui"
     />
-    <span>{{ props.unit }}</span>
 
-    <ElButton v-if="props.show" @Click="handleToggle" size="small">
+    <UBadge>{{ props.unit }}</UBadge>
+    <UButton v-if="props.show" @click="handleToggle">
       {{ props.value[2] ? '严格' : '宽松' }}
-    </ElButton>
-  </div>
+    </UButton>
+    <slot />
+  </UFieldGroup>
 </template>
-
-<style lang="scss" scoped></style>

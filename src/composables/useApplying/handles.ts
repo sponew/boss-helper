@@ -1,630 +1,540 @@
-import { ElMessage } from 'element-plus'
-import { miTem } from 'mitem'
-
-import { useChat } from '@/composables/useChat'
-import { useModel } from '@/composables/useModel'
-import { useStatistics } from '@/composables/useStatistics'
-import { Message } from '@/composables/useWebSocket'
 import { counter } from '@/message'
-import { useConf } from '@/stores/conf'
-import type { logData } from '@/stores/log'
-import { useUser } from '@/stores/user'
-import {
-  ActivityError,
-  AIFilteringError,
-  CompanyNameError,
-  CompanySizeError,
-  FriendStatusError,
-  GoldHunterError,
-  GreetError,
-  HrPositionError,
-  JobAddressError,
-  JobDescriptionError,
-  JobTitleError,
-  RepeatError,
-  SalaryError,
-} from '@/types/deliverError'
-import { getCurDay, getCurTime } from '@/utils'
+import { renderTemplate } from '@/utils/ai'
+import { HelperContext } from '~/composables/useHelper'
 
-import { SignedKeyLLM } from '../useModel/signedKey'
-import type { StepFactory } from './type'
-import {
-  errorHandle,
-  parseFiltering,
-  rangeMatch,
-  rangeMatchFormat,
-  requestBossData,
-  sameCompanyKey,
-  sameHrKey,
-} from './utils'
+import { sameCompanyKey, sameHrKey } from '../../entrypoints/boss/requests'
+import { defineTaskHandler, JobStatus, TaskContext, TaskResult } from './type'
+import { parseFiltering, rangeMatch, rangeMatchFormat } from './utils'
 
-export function handles() {
-  const { chatMessages } = useChat()
-  const model = useModel()
-  const conf = useConf()
-  const statistics = useStatistics()
-  const now = Date.now()
-  const communicated: StepFactory = () => {
-    return async ({ data }) => {
-      if (data.contact) {
-        throw new RepeatError(`已经沟通过`)
-      }
-    }
-  }
+export class DependencyMissingError {
+  constructor(public taskId: string) {}
+}
 
-  const SameCompanyFilter: StepFactory = () => {
-    if (!conf.formData.sameCompanyFilter.value) {
-      return
-    }
-    let someSet: Set<string> | null = null
-    let count = 0
-    const uid = useUser().getUserId()
-    if (uid == null) {
-      throw new RepeatError('没有获取到uid')
-    }
+export class HelperConfigError {
+  constructor(
+    public key: string,
+    public message?: string,
+  ) {}
+}
+
+// function chatBossMessage(_ctx: LogData, _msg: string) {
+//   const _d = new Date()
+//   // chatMessages.value.push({
+//   //   id: d.getTime(),
+//   //   role: 'boss',
+//   //   content: msg,
+//   //   date: [getCurDay(d), getCurTime(d)],
+//   //   name: ctx.jobData.brandName,
+//   //   avatar: ctx.jobData.brandLogo,
+//   // })
+// }
+
+function amapHandler<C extends HelperContext<C, T, S>, T, S>(
+  ctx: TaskContext<C, T, S>,
+  id: string,
+  distance: number,
+  duration: number,
+  amap?: { ok: boolean; distance: number; duration: number },
+): TaskResult | void {
+  if (!amap || amap.ok === false) {
     return {
-      fn: async ({ data }) => {
-        if (someSet == null) {
-          someSet = new Set<string>()
-          const data = await counter.storageGet<Record<string, string[]>>(sameCompanyKey, {})
-          for (const id of data[uid] ?? []) {
-            someSet.add(id)
-          }
-        }
-        const id = data.encryptBrandId
-        if (id != null && someSet.has(id)) {
-          throw new RepeatError('相同公司已投递')
-        }
-      },
-      after: async ({ data }) => {
-        someSet?.add(data.encryptBrandId)
-        count++
-        if (count > 3) {
-          const oldData = await counter.storageGet<Record<string, string[]>>(sameCompanyKey, {})
-          await counter.storageSet(sameCompanyKey, {
-            ...oldData,
-            [uid]: Array.from(someSet ?? []),
-          })
-          count = 0
-        }
-      },
+      isSkip: true,
+      reason: '高德地图未初始化',
     }
   }
-
-  const SameHrFilter: StepFactory = () => {
-    if (!conf.formData.sameHrFilter.value) {
-      return
-    }
-    let someSet: Set<string> | null = null
-    let count = 0
-    const uid = useUser().getUserId()
-    if (uid == null) {
-      throw new RepeatError('没有获取到uid')
-    }
+  if (distance > 0 && amap.distance > distance * 1000) {
     return {
-      fn: async ({ data }) => {
-        if (someSet == null) {
-          someSet = new Set<string>()
-          const data = await counter.storageGet<Record<string, string[]>>(sameHrKey, {})
-          for (const id of data[uid] ?? []) {
-            someSet.add(id)
-          }
-        }
-        const id = data.encryptBossId
-        if (id != null && someSet.has(id)) {
-          throw new RepeatError('相同hr已投递')
-        }
-      },
-      after: async ({ data }) => {
-        someSet?.add(data.encryptBossId)
-        count++
-        if (count > 3) {
-          const oldData = await counter.storageGet<Record<string, string[]>>(sameHrKey, {})
-          await counter.storageSet(sameHrKey, {
-            ...oldData,
-            [uid]: Array.from(someSet ?? []),
-          })
-          count = 0
-        }
-      },
+      isSkip: true,
+      reason: `${id}距离超标: ${amap.distance / 1000} 设定: ${ctx.helper.conf.formData.amap.straightDistance}`,
     }
   }
+  if (duration > 0 && amap.duration > duration * 60) {
+    return {
+      isSkip: true,
+      reason: `${id}时间超标: ${amap.duration / 60} 设定: ${ctx.helper.conf.formData.amap.drivingDuration}`,
+    }
+  }
+}
 
-  const jobTitle: StepFactory = () => {
-    if (!conf.formData.jobTitle.enable) {
+export const taskResult = {
+  skip: (reason: string, status: JobStatus = 'warn'): TaskResult => ({
+    isSkip: true,
+    reason,
+    status,
+  }),
+  error: (reason: string): TaskResult => ({
+    isSkip: true,
+    reason,
+    status: 'error',
+  }),
+}
+
+export class TaskRegistry<C extends HelperContext<C, T, S>, T, S = {}> {
+  SameCompanyFilter = defineTaskHandler<C, T, S>(
+    '重复沟通-相同公司',
+    async (ctx) => {
+      if (!ctx.helper.conf.formData.sameCompanyFilter.value) {
+        return
+      }
+      const someSet: Set<string> = new Set<string>()
+      const data = await counter.storageGet<Record<string, string[]>>(sameCompanyKey, {})
+      for (const id of data[ctx.helper.uid] ?? []) {
+        someSet.add(id)
+      }
+      return {
+        fn: async (_, { jobData: data }) => {
+          if (someSet.has(data.key)) {
+            return taskResult.skip('相同公司已投递')
+          }
+        },
+        after: [
+          async (ctx, { jobData: data }) => {
+            someSet.add(data.key)
+            if (someSet.size % 3 === 0) {
+              const oldData = await counter.storageGet<Record<string, string[]>>(sameCompanyKey, {})
+              await counter.storageSet(sameCompanyKey, {
+                ...oldData,
+                [ctx.helper.uid]: Array.from(someSet ?? []),
+              })
+            }
+          },
+        ],
+      }
+    },
+    { label: '相同公司' },
+  )
+
+  SameHrFilter = defineTaskHandler<C, T, S>(
+    '重复沟通-相同HR',
+    async (ctx) => {
+      if (!ctx.helper.conf.formData.sameHrFilter.value) {
+        return
+      }
+      const someSet: Set<string> | null = new Set<string>()
+      const data = await counter.storageGet<Record<string, string[]>>(sameHrKey, {})
+      for (const id of data[ctx.helper.uid] ?? []) {
+        someSet.add(id)
+      }
+
+      return {
+        fn: async (_, { jobData: data }) => {
+          if (data.key != null && someSet.has(data.key)) {
+            return taskResult.skip('相同hr已投递')
+          }
+        },
+        after: [
+          async (ctx, { jobData: data }) => {
+            someSet.add(data.key)
+            if (someSet.size % 3 === 0) {
+              const oldData = await counter.storageGet<Record<string, string[]>>(sameHrKey, {})
+              await counter.storageSet(sameHrKey, {
+                ...oldData,
+                [ctx.helper.uid]: Array.from(someSet ?? []),
+              })
+            }
+          },
+        ],
+      }
+    },
+    { label: '相同HR' },
+  )
+
+  jobTitle = defineTaskHandler<C, T, S>('岗位名', (ctx) => {
+    if (!ctx.helper.conf.formData.jobTitle.enable) {
       return
     }
-    return async ({ data }, _ctx) => {
-      try {
-        const text = data.jobName.toLowerCase()
-        if (!text) throw new JobTitleError('岗位名为空')
-        for (const x of conf.formData.jobTitle.value) {
-          if (text.includes(x.toLowerCase())) {
-            if (conf.formData.jobTitle.include) {
-              return
-            }
-            throw new JobTitleError(`岗位名含有排除关键词 [${x}]`)
+    return async (_ctx, { jobData: data }) => {
+      const text = data.jobName.toLowerCase()
+      if (!text) return taskResult.skip('岗位名为空')
+      for (const x of ctx.helper.conf.formData.jobTitle.value) {
+        if (text.includes(x.toLowerCase())) {
+          if (ctx.helper.conf.formData.jobTitle.include) {
+            return
+          }
+          return {
+            isSkip: true,
+            reason: `岗位名含有排除关键词 [${x}]`,
           }
         }
-        if (conf.formData.jobTitle.include) {
-          throw new JobTitleError('岗位名不包含关键词')
-        }
-      } catch (e) {
-        statistics.todayData.jobTitle++
-        throw new JobTitleError(errorHandle(e))
+      }
+      if (ctx.helper.conf.formData.jobTitle.include) {
+        return taskResult.skip('岗位名不包含关键词')
       }
     }
-  }
+  })
 
-  const goldHunterFilter: StepFactory = () => {
-    if (!conf.formData.goldHunterFilter.value) {
+  goldHunterFilter = defineTaskHandler<C, T, S>('猎头过滤', (ctx) => {
+    if (!ctx.helper.conf.formData.goldHunterFilter.value) {
       return
     }
-    return async ({ data }, _ctx) => {
-      if (data?.goldHunter === 1) {
-        statistics.todayData.goldHunterFilter++
-        throw new GoldHunterError('猎头过滤')
+    return async (_ctx, { jobData: data }) => {
+      if (data?.boss.isHeadhunter === true) {
+        return {
+          isSkip: true,
+          reason: '猎头过滤',
+        }
       }
     }
-  }
+  })
 
-  const company: StepFactory = () => {
-    if (!conf.formData.company.enable) return
-    return async ({ data }, _ctx) => {
-      try {
-        const text = data.brandName
-        if (!text) throw new CompanyNameError('公司名为空')
+  company = defineTaskHandler<C, T, S>('公司名', (ctx) => {
+    if (!ctx.helper.conf.formData.company.enable) return
+    return async (_ctx, { jobData: data }) => {
+      const text = data.brand.name
+      if (!text) return taskResult.skip('公司名为空')
 
-        for (const x of conf.formData.company.value) {
-          if (text.includes(x)) {
-            if (conf.formData.company.include) {
-              return
-            }
-            throw new CompanyNameError(`公司名含有排除关键词 [${x}]`)
+      for (const x of ctx.helper.conf.formData.company.value) {
+        if (!x) {
+          continue
+        }
+        if (text.includes(x)) {
+          if (ctx.helper.conf.formData.company.include) {
+            return
+          }
+          return {
+            isSkip: true,
+            reason: `公司名含有排除关键词 [${x}]`,
           }
         }
-        if (conf.formData.company.include) {
-          throw new CompanyNameError('公司名不包含关键词')
-        }
-      } catch (e) {
-        statistics.todayData.company++
-        throw new CompanyNameError(errorHandle(e))
+      }
+      if (ctx.helper.conf.formData.company.include) {
+        return taskResult.skip('公司名不包含关键词')
       }
     }
-  }
+  })
 
-  const salaryRange: StepFactory = () => {
-    if (!conf.formData.salaryRange.enable) {
+  salaryRange = defineTaskHandler<C, T, S>('薪资范围', (ctx) => {
+    if (!ctx.helper.conf.formData.salaryRange.enable) {
       return
     }
     const arr = [
-      ['元/时', conf.formData.salaryRange.advancedValue.H],
-      ['元/天', conf.formData.salaryRange.advancedValue.D],
-      ['元/月', conf.formData.salaryRange.advancedValue.M],
-      ['K', conf.formData.salaryRange.value],
+      ['元/时', ctx.helper.conf.formData.salaryRange.advancedValue.H],
+      ['元/天', ctx.helper.conf.formData.salaryRange.advancedValue.D],
+      ['元/月', ctx.helper.conf.formData.salaryRange.advancedValue.M],
+      ['K', ctx.helper.conf.formData.salaryRange.value],
     ] as const
-    return async ({ data }, _ctx) => {
-      try {
-        const text = data.salaryDesc
-        for (const key of arr) {
-          if (text.includes(key[0])) {
-            if (!rangeMatch(text, key[1])) {
-              throw new SalaryError(
-                `不匹配的薪资范围 ${text}, 预期: ${rangeMatchFormat(key[1], key[0])}`,
-              )
+    return async (_ctx, { jobData: data }) => {
+      const text = data.salary
+      for (const key of arr) {
+        if (text.includes(key[0])) {
+          if (!rangeMatch(text, key[1])) {
+            return {
+              isSkip: true,
+              reason: `不匹配的薪资范围 ${text}, 预期: ${rangeMatchFormat(key[1], key[0])}`,
             }
           }
         }
-      } catch (e) {
-        statistics.todayData.salaryRange++
-        throw new SalaryError(errorHandle(e))
       }
     }
-  }
+  })
 
-  const companySizeRange: StepFactory = () => {
-    if (!conf.formData.companySizeRange.enable) {
+  companySizeRange = defineTaskHandler<C, T, S>('公司规模', (ctx) => {
+    if (!ctx.helper.conf.formData.companySizeRange.enable) {
       return
     }
-    return async ({ data }, _ctx) => {
-      try {
-        const text = data.brandScaleName
-        if (!rangeMatch(text, conf.formData.companySizeRange.value)) {
-          throw new CompanySizeError(
-            `不匹配的公司规模 ${text}, 预期: ${rangeMatchFormat(conf.formData.companySizeRange.value, '人')}`,
-          )
-        }
-      } catch (e) {
-        statistics.todayData.companySizeRange++
-        throw new CompanySizeError(errorHandle(e))
-      }
-    }
-  }
-
-  const jobContent: StepFactory = () => {
-    if (!conf.formData.jobContent.enable) {
-      return
-    }
-    return async (_, ctx) => {
-      try {
-        const content = ctx.listData.card?.postDescription.toLowerCase()
-        for (const x of conf.formData.jobContent.value) {
-          if (!x) {
-            continue
-          }
-          const re = new RegExp(`(?<!(不|无).{0,5})${x.toLowerCase()}(?!系统|软件|工具|服务)`)
-          if (content != null && re.test(content)) {
-            if (conf.formData.jobContent.include) {
-              return
-            }
-            throw new JobDescriptionError(`工作内容含有排除关键词 [${x}]`)
-          }
-        }
-        if (conf.formData.jobContent.include) {
-          throw new JobDescriptionError('工作内容中不包含关键词')
-        }
-      } catch (e) {
-        statistics.todayData.jobContent++
-        throw new JobDescriptionError(errorHandle(e))
-      }
-    }
-  }
-
-  const hrPosition: StepFactory = () => {
-    if (!conf.formData.hrPosition.enable) {
-      return
-    }
-    return async (_, ctx) => {
-      try {
-        const content = ctx.listData.card?.bossTitle
-        for (const x of conf.formData.hrPosition.value) {
-          if (!x) {
-            continue
-          }
-          if (content != null && content.trim() === x) {
-            if (conf.formData.hrPosition.include) {
-              return
-            }
-            throw new HrPositionError(`Hr职位在黑名单中 ${content}`)
-          }
-        }
-        if (conf.formData.hrPosition.include) {
-          throw new HrPositionError(`Hr职位不在白名单中: ${content}`)
-        }
-      } catch (e) {
-        statistics.todayData.hrPosition++
-        throw new HrPositionError(errorHandle(e))
-      }
-    }
-  }
-
-  const jobAddress: StepFactory = () => {
-    if (!conf.formData.jobAddress.enable) {
-      return
-    }
-    return async (_, ctx) => {
-      try {
-        if (conf.formData.jobAddress.value.length === 0) {
-          return
-        }
-        const content = ctx.listData.card?.address.trim()
-        for (const x of conf.formData.jobAddress.value) {
-          if (!x) {
-            continue
-          }
-          if (content?.includes(x)) {
-            return
-          }
-        }
-        throw new JobAddressError(`工作地址不包含关键词: ${content}`)
-      } catch (e) {
-        statistics.todayData.jobAddress++
-        throw new JobAddressError(errorHandle(e))
-      }
-    }
-  }
-
-  const jobFriendStatus: StepFactory = () => {
-    if (!conf.formData.friendStatus.value) {
-      return
-    }
-    return async (_, ctx) => {
-      const content = ctx.listData.card?.friendStatus
-
-      if (content != null && content !== 0) {
-        throw new FriendStatusError('已经是好友了')
-      }
-    }
-  }
-
-  const aiFiltering: StepFactory = () => {
-    if (!conf.formData.aiFiltering.enable) {
-      return
-    }
-    const curModel = model.modelData.find((v) => conf.formData.aiFiltering.model === v.key)
-    if (!curModel && !conf.formData.aiFiltering.vip) {
-      throw new AIFilteringError('没有找到AI筛选的模型')
-    }
-    const gpt = model.getModel(
-      curModel,
-      conf.formData.aiFiltering.prompt,
-      conf.formData.aiFiltering.vip,
-    )
-    if (gpt instanceof SignedKeyLLM) {
-      void gpt.checkResume()
-    }
-    return async (_, ctx) => {
-      // const chatInput = chatInputInit(model)
-      try {
-        const { content, prompt, reasoning_content } = await gpt.message(
-          {
-            data: {
-              data: ctx.listData,
-              boss: ctx.bossData,
-              card: ctx.listData.card!,
-              amap: {
-                straightDistance: (ctx.amap?.distance?.straight.distance ?? 0) / 1000,
-                drivingDistance: (ctx.amap?.distance?.driving.distance ?? 0) / 1000,
-                drivingDuration: (ctx.amap?.distance?.driving.duration ?? 0) / 60,
-                walkingDistance: (ctx.amap?.distance?.walking.distance ?? 0) / 1000,
-                walkingDuration: (ctx.amap?.distance?.walking.duration ?? 0) / 60,
-              },
-            },
-            amap: conf.formData.amap.enable
-              ? `直线距离:${(ctx.amap?.distance?.straight.distance ?? 0) / 1000}km
-驾车距离:${(ctx.amap?.distance?.driving.distance ?? 0) / 1000}km
-驾车时间:${(ctx.amap?.distance?.driving.duration ?? 0) / 60}分钟
-步行距离:${(ctx.amap?.distance?.walking.distance ?? 0) / 1000}km
-步行时间:${(ctx.amap?.distance?.walking.duration ?? 0) / 60}分钟`
-              : '',
-            json: true,
-            // onStream: chatInput.handle,
-            onPrompt: (s) => chatBossMessage(ctx, s),
-          },
-          'aiFiltering',
+    return async (ctx, { jobData: data }) => {
+      const text = data.brand.scale
+      if (!rangeMatch(text, ctx.helper.conf.formData.companySizeRange.value)) {
+        return taskResult.skip(
+          `不匹配的公司规模 ${text}, 预期: ${rangeMatchFormat(ctx.helper.conf.formData.companySizeRange.value, '人')}`,
         )
-
-        ctx.aiFilteringQ = prompt
-        if (content == null) {
-          return
-        }
-        const { res, message, rating } = parseFiltering(content)
-
-        ctx.aiFilteringAjson = res || {}
-        ctx.aiFilteringAtext = message
-        ctx.aiFilteringR = reasoning_content
-
-        // chatInput.end(message)
-        if (rating < (conf.formData.aiFiltering.score ?? 10)) {
-          throw new AIFilteringError(message)
-        }
-      } catch (e) {
-        statistics.todayData.jobContent++
-        // chatInput.end('Err~')
-        throw new AIFilteringError(errorHandle(e))
       }
     }
-  }
-
-  const activityFilter: StepFactory = () => {
-    if (!conf.formData.activityFilter.value) {
+  })
+  jobContent = defineTaskHandler<C, T, S>('工作内容', (ctx) => {
+    if (!ctx.helper.conf.formData.jobContent.enable) {
       return
     }
-    return async (_, ctx) => {
-      try {
-        const activeText = ctx.listData.card?.activeTimeDesc
-        const activeTime = ctx.listData.card?.brandComInfo?.activeTime
-        // 暂时先用文本匹配吧, activeTime备用(没确认是否准确)
-        if (!activeText && !activeTime) {
-          throw new ActivityError(`无活跃内容,如果全失败请反馈`)
-        } else if (!activeText && activeTime) {
-          if (now - activeTime >= 7 * 24 * 60 * 60 * 1000) {
-            throw new ActivityError(`不活跃 [${new Date(activeTime).toLocaleString()}]`)
-          }
-        } else if (!activeText) {
-          throw new ActivityError(`无活跃信息,如果全失败请反馈`)
-        } else if (activeText.includes('月') || activeText.includes('年'))
-          throw new ActivityError(`不活跃, [${activeText}]`)
-      } catch (e) {
-        statistics.todayData.activityFilter++
-        throw new ActivityError(errorHandle(e))
-      }
-    }
-  }
-
-  const customGreeting: StepFactory = () => {
-    const template = miTem.compile(conf.formData.customGreeting.value)
-    const uid = useUser().getUserId()
-    if (uid == null) {
-      ElMessage.error('没有获取到uid,请刷新重试')
-      throw new GreetError('没有获取到uid')
-    }
-    return {
-      after: async (args, ctx) => {
-        try {
-          if (ctx.bossData == null) {
-            const bossData = await requestBossData(ctx.listData.card!)
-            ctx.bossData = bossData
-          }
-          let msg = conf.formData.customGreeting.value
-          if (conf.formData.greetingVariable.value && ctx.listData.card) {
-            msg = template({
-              data: ctx.listData,
-              boss: ctx.bossData,
-              card: ctx.listData.card,
-              amap: {
-                straightDistance: (ctx.amap?.distance?.straight.distance ?? 0) / 1000,
-                drivingDistance: (ctx.amap?.distance?.driving.distance ?? 0) / 1000,
-                drivingDuration: (ctx.amap?.distance?.driving.duration ?? 0) / 60,
-                walkingDistance: (ctx.amap?.distance?.walking.distance ?? 0) / 1000,
-                walkingDuration: (ctx.amap?.distance?.walking.duration ?? 0) / 60,
-              },
-            })
-          }
-
-          ctx.message = msg
-
-          const buf = new Message({
-            form_uid: uid.toString(),
-            to_uid: ctx.bossData.data.bossId.toString(),
-            to_name: ctx.bossData.data.encryptBossId, // encryptUserId
-            content: msg,
-          })
-
-          buf.send()
-        } catch (e) {
-          throw new GreetError(errorHandle(e))
+    return async (ctx, { jobData }) => {
+      const content = jobData.jobDescription.toLowerCase()
+      for (const x of ctx.helper.conf.formData.jobContent.value) {
+        if (!x) {
+          continue
         }
-      },
-    }
-  }
-
-  function chatBossMessage(ctx: logData, msg: string) {
-    const d = new Date()
-    chatMessages.value.push({
-      id: d.getTime(),
-      role: 'boss',
-      content: msg,
-      date: [getCurDay(d), getCurTime(d)],
-      name: ctx.listData.brandName,
-      avatar: ctx.listData.brandLogo,
-    })
-  }
-
-  const aiGreeting: StepFactory = () => {
-    const curModel = model.modelData.find((v) => conf.formData.aiGreeting.model === v.key)
-    if (!curModel && !conf.formData.aiGreeting.vip) {
-      ElMessage.warning('没有找到招呼语的模型')
-      return
-    }
-    const gpt = model.getModel(
-      curModel,
-      conf.formData.aiGreeting.prompt,
-      conf.formData.aiGreeting.vip,
-    )
-    if (gpt instanceof SignedKeyLLM) {
-      void gpt.checkResume()
-    }
-    const uid = useUser().getUserId()
-    if (uid == null) {
-      ElMessage.error('没有获取到uid,请刷新重试')
-      throw new GreetError('没有获取到uid')
-    }
-    return {
-      after: async (args, ctx) => {
-        // const chatInput = chatInputInit(model)
-        try {
-          if (ctx.bossData == null) {
-            const bossData = await requestBossData(ctx.listData.card!)
-            ctx.bossData = bossData
-          }
-          const { content, prompt, reasoning_content } = await gpt.message(
-            {
-              data: {
-                data: ctx.listData,
-                boss: ctx.bossData,
-                card: ctx.listData.card!,
-                amap: {},
-              },
-              // onStream: chatInput.handle,
-              onPrompt: (s) => chatBossMessage(ctx, s),
-            },
-            'aiGreeting',
-          )
-          ctx.aiGreetingQ = prompt
-          if (content == null) {
+        const re = new RegExp(`(?<!(不|无).{0,5})${x.toLowerCase()}(?!系统|软件|工具|服务)`)
+        if (content != null && re.test(content)) {
+          if (ctx.helper.conf.formData.jobContent.include) {
             return
           }
-          ctx.message = content
-          ctx.aiGreetingA = content
-          ctx.aiGreetingR = reasoning_content
-          // chatInput.end(content)
-          const buf = new Message({
-            form_uid: uid.toString(),
-            to_uid: ctx.bossData.data.bossId.toString(),
-            to_name: ctx.bossData.data.encryptBossId, // encryptUserId
-            content,
-          })
-          buf.send()
-        } catch (e) {
-          // chatInput.end('Err~')
-          throw new GreetError(errorHandle(e))
+          return {
+            isSkip: true,
+            reason: `工作内容含有排除关键词 [${x}]`,
+          }
         }
-      },
+      }
+      if (ctx.helper.conf.formData.jobContent.include) {
+        return taskResult.skip('工作内容中不包含关键词')
+      }
     }
-  }
+  })
 
-  const greeting: StepFactory = () => {
-    if (conf.formData.aiGreeting.enable) {
-      // AI招呼语
-      return aiGreeting()
-    } else if (conf.formData.customGreeting.enable) {
-      // 自定义招呼语
-      return customGreeting()
-    }
-  }
-
-  function amapHandler(
-    id: string,
-    distance: number,
-    duration: number,
-    amap?: { ok: boolean; distance: number; duration: number },
-  ) {
-    if (!amap || amap.ok === false) {
-      throw new JobAddressError('高德地图未初始化')
-    }
-    if (distance > 0 && amap.distance > distance * 1000) {
-      throw new JobAddressError(
-        `${id}距离超标: ${amap.distance / 1000} 设定: ${conf.formData.amap.straightDistance}`,
-      )
-    }
-    if (duration > 0 && amap.duration > duration * 60) {
-      throw new JobAddressError(
-        `${id}时间超标: ${amap.duration / 60} 设定: ${conf.formData.amap.drivingDuration}`,
-      )
-    }
-  }
-
-  const amap: StepFactory = () => {
-    if (!conf.formData.amap.enable) {
+  hrPosition = defineTaskHandler<C, T, S>('Hr职位', (ctx) => {
+    if (!ctx.helper.conf.formData.hrPosition.enable) {
       return
     }
-    return async (_, ctx) => {
-      if (ctx.amap == null || ctx.amap.distance == null) {
-        throw new JobAddressError('高德地图api数据异常')
+    return async (_, { jobData }) => {
+      const content = jobData.boss.title
+      for (const x of ctx.helper.conf.formData.hrPosition.value) {
+        if (!x) {
+          continue
+        }
+        if (content != null && content.trim() === x) {
+          if (ctx.helper.conf.formData.hrPosition.include) {
+            return
+          }
+          return {
+            isSkip: true,
+            reason: `Hr职位在黑名单中 ${content}`,
+          }
+        }
       }
-      amapHandler('直线', conf.formData.amap.straightDistance, 0, ctx.amap.distance.straight)
-      amapHandler(
-        '驾车',
-        conf.formData.amap.drivingDistance,
-        conf.formData.amap.drivingDuration,
-        ctx.amap.distance.driving,
-      )
-      amapHandler(
-        '步行',
-        conf.formData.amap.walkingDistance,
-        conf.formData.amap.walkingDuration,
-        ctx.amap.distance.walking,
-      )
+      if (ctx.helper.conf.formData.hrPosition.include) {
+        return taskResult.skip(`Hr职位不在白名单中: ${content}`)
+      }
     }
-  }
+  })
 
-  return {
-    communicated,
-    SameCompanyFilter,
-    SameHrFilter,
-    jobTitle,
-    goldHunterFilter,
-    company,
-    salaryRange,
-    companySizeRange,
-    jobContent,
-    hrPosition,
-    jobAddress,
-    jobFriendStatus,
-    aiFiltering,
-    activityFilter,
-    greeting,
-    amap,
-  }
+  jobAddress = defineTaskHandler<C, T, S>('工作地址', (ctx) => {
+    if (!ctx.helper.conf.formData.jobAddress.enable) {
+      return
+    }
+    return async (_, { jobData }) => {
+      if (ctx.helper.conf.formData.jobAddress.value.length === 0 || !jobData.address) {
+        return
+      }
+      const content = jobData.address.toLowerCase()
+      for (const x of ctx.helper.conf.formData.jobAddress.value) {
+        if (!x) {
+          continue
+        }
+        if (content.includes(x.toLowerCase())) {
+          if (ctx.helper.conf.formData.jobAddress.include) {
+            return
+          }
+          return {
+            isSkip: true,
+            reason: `工作地址含有排除关键词 [${x}]`,
+          }
+        }
+      }
+      return {
+        isSkip: true,
+        reason: `工作地址不包含关键词: ${content}`,
+      }
+    }
+  })
+
+  jobFriendStatus = defineTaskHandler<C, T, S>('好友状态', (ctx) => {
+    if (!ctx.helper.conf.formData.friendStatus.value) {
+      return
+    }
+    return async (_, { jobData }) => {
+      if (jobData.boss?.isFriend === true) {
+        return {
+          isSkip: true,
+          reason: '已经是好友了',
+        }
+      }
+    }
+  })
+
+  aiFiltering = defineTaskHandler<C, T, S>(
+    'AI筛选',
+    (ctx) => {
+      if (!ctx.helper.conf.formData.aiFiltering.enable) {
+        return
+      }
+      if (
+        !ctx.helper.chatModel.createAgent(ctx.helper.conf.formData.aiFiltering, 'filtering', {
+          json: true,
+        })
+      ) {
+        throw new HelperConfigError('aiFiltering.model', 'AI筛选模型未配置')
+      }
+      return async (ctx, data) => {
+        const content = await ctx.helper.chatModel.chat('filtering', data).then((r) => r.text)
+        const { message, rating } = parseFiltering(content)
+        if (rating < (ctx.helper.conf.formData.aiFiltering.score ?? 10)) {
+          return taskResult.skip(message)
+        }
+      }
+    },
+    {
+      state: 'ai',
+      stateMsg: 'AI筛选中',
+    },
+  )
+
+  activityFilter = defineTaskHandler<C, T, S>('活跃度过滤', (ctx) => {
+    if (!ctx.helper.conf.formData.activityFilter.value) {
+      return
+    }
+    return async (_, { jobData }) => {
+      const activeText = jobData.activeTimeStr
+      const activeTime = jobData.activeTime
+      // TODO: 暂时先用文本匹配吧, activeTime 备用(没确认是否准确)
+      if (!activeText && !activeTime) {
+        return taskResult.skip(`无活跃内容,如果全失败请反馈`)
+      } else if (!activeText && activeTime) {
+        if (ctx.now.getTime() - activeTime >= 7 * 24 * 60 * 60 * 1000) {
+          return {
+            isSkip: true,
+            reason: `不活跃 [${new Date(activeTime).toLocaleString()}]`,
+          }
+        }
+      } else if (!activeText) {
+        return taskResult.skip(`无活跃信息,如果全失败请反馈`)
+      } else if (activeText.includes('月') || activeText.includes('年'))
+        return taskResult.skip(`不活跃, [${activeText}]`)
+    }
+  })
+
+  customGreeting = defineTaskHandler<C, T, S>(
+    '打招呼',
+    (ctx) => {
+      if (!ctx.helper.conf.formData.customGreeting.enable) {
+        return
+      }
+      return async (ctx, data) => {
+        // if (ctx.bossData == null) {
+        //   const bossData = await requestBossData(ctx.jobData.card!)
+        //   ctx.bossData = bossData
+        // }
+        let msg = ctx.helper.conf.formData.customGreeting.value
+        if (ctx.helper.conf.formData.greetingVariable.value) {
+          msg = renderTemplate(msg, data)
+        }
+
+        // ctx.message = msg
+
+        // const buf = new Message({
+        //   form_uid: uid.toString(),
+        //   to_uid: ctx.bossData.data.bossId.toString(),
+        //   to_name: ctx.bossData.data.encryptBossId, // encryptUserId
+        //   content: msg,
+        // })
+
+        // buf.send()
+
+        ctx.helper.sendMessage?.(data.jobData.key, msg)
+      }
+    },
+    { label: '自定义招呼语' },
+  )
+
+  aiGreeting = defineTaskHandler<C, T, S>(
+    '打招呼',
+    (ctx) => {
+      if (!ctx.helper.conf.formData.aiGreeting.enable) {
+        return
+      }
+      if (!ctx.helper.chatModel.createAgent(ctx.helper.conf.formData.aiGreeting, 'greetings')) {
+        throw new HelperConfigError('aiGreeting.model', 'AI招呼模型未配置')
+      }
+      return async (ctx, data) => {
+        const msg = await ctx.helper.chatModel.chat('greetings', data).then((r) => r.text)
+        ctx.helper.sendMessage?.(data.jobData.key, msg)
+        // const chatInput = chatInputInit(model)
+        // try {
+        //   if (data.bossData == null) {
+        //     const bossData = await requestBossData(data.jobData.card!)
+        //     data.bossData = bossData
+        //   }
+        //   const { content, prompt, reasoning_content } = await gpt.message(
+        //     {
+        //       data: {
+        //         data: data.jobData,
+        //         boss: data.bossData,
+        //         card: data.jobData.card!,
+        //         amap: {},
+        //       },
+        //       // onStream: chatInput.handle,
+        //       onPrompt: (s) => chatBossMessage(data, s),
+        //     },
+        //     'aiGreeting',
+        //   )
+        //   data.aiGreetingQ = prompt
+        //   if (content == null) {
+        //     return
+        //   }
+        //   data.message = content
+        //   data.aiGreetingA = content
+        //   data.aiGreetingR = reasoning_content
+        //   // chatInput.end(content)
+        //   const buf = new Message({
+        //     form_uid: uid.toString(),
+        //     to_uid: data.bossData.data.bossId.toString(),
+        //     to_name: data.bossData.data.encryptBossId, // encryptUserId
+        //     content,
+        //   })
+        //   buf.send()
+        // } catch (e) {
+        //   // chatInput.end('Err~')
+        // return {
+        //   isSkip: true,
+        //   reason: errorHandle(e),
+        // }
+        // }
+      }
+    },
+    { label: 'AI招呼语', state: 'ai', stateMsg: '生成招呼语中' },
+  )
+
+  // greeting: defineTaskHandler<C, T,S>('招呼语生成', (ctx) => {
+  //   if (ctx.helper.conf.formData.aiGreeting.enable) {
+  //     // AI招呼语
+  //     return aiGreeting()
+  //   } else if (ctx.helper.conf.formData.customGreeting.enable) {
+  //     // 自定义招呼语
+  //     return customGreeting()
+  //   }
+  // }),
+
+  amap = defineTaskHandler<C, T, S>('高德地图', (ctx) => {
+    if (!ctx.helper.conf.formData.amap.enable) {
+      return
+    }
+    return async (ctx, { jobData, state }) => {
+      state.amap ??= {}
+
+      if (!jobData.address) {
+        return taskResult.skip('地址信息为空')
+      }
+      state.amap.geocode = await amapGeocode(jobData.address) // TODO: 直接使用经纬度
+      if (!state.amap.geocode?.location) {
+        return taskResult.skip('未获取到地址经纬度')
+      }
+      state.amap.distance = await amapDistance(state.amap.geocode.location)
+
+      if (state.amap == null || state.amap.distance == null) {
+        return {
+          isSkip: true,
+          reason: 'api数据异常',
+        }
+      }
+      return [
+        amapHandler(
+          ctx,
+          '直线',
+          ctx.helper.conf.formData.amap.straightDistance,
+          0,
+          state.amap.distance.straight,
+        ),
+        amapHandler(
+          ctx,
+          '驾车',
+          ctx.helper.conf.formData.amap.drivingDistance,
+          ctx.helper.conf.formData.amap.drivingDuration,
+          state.amap.distance.driving,
+        ),
+        amapHandler(
+          ctx,
+          '步行',
+          ctx.helper.conf.formData.amap.walkingDistance,
+          ctx.helper.conf.formData.amap.walkingDuration,
+          state.amap.distance.walking,
+        ),
+      ]
+    }
+  })
 }

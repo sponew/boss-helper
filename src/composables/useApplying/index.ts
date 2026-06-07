@@ -1,119 +1,24 @@
+import { shallowRef, ref } from 'vue'
+
 import { PipelineCacheManager } from '@/composables/usePipelineCache'
-import type { JobStatus } from '@/stores/jobs'
-import { JobAddressError, UnknownError } from '@/types/deliverError'
 import type { PipelineCacheItem, ProcessorType } from '@/types/pipelineCache'
-import { amapDistance, amapGeocode } from '@/utils/amap'
-import { logger } from '@/utils/logger'
 
-import { handles } from './handles'
-import type { Handler, Pipeline, Step } from './type'
-
-export * from './utils'
+import { HelperContext } from '../useHelper'
+import { DependencyMissingError } from './handles'
+import {
+  Handler,
+  JobStatus,
+  jobStatusList,
+  Task,
+  TaskContext,
+  TaskPipeline,
+  TaskResult,
+  TaskStatus,
+  WorkflowData,
+} from './type'
 
 // 全局缓存管理器实例
 let cacheManager: PipelineCacheManager | null = null
-
-function compilePipeline(
-  pipeline: Pipeline,
-  isNested = false,
-): {
-  before: Handler[]
-  after: Handler[]
-} {
-  const result: {
-    before: Handler[]
-    after: Handler[]
-  } = {
-    before: [],
-    after: [],
-  }
-  let guard: Step | undefined
-  if (isNested) {
-    const first = pipeline.shift()
-    if (Array.isArray(first)) {
-      throw new TypeError('PipelineGroup 第一项不能是数组')
-    }
-    guard = first
-  }
-  for (const h of pipeline) {
-    if (h == null) {
-      continue
-    }
-    if (Array.isArray(h)) {
-      const { before, after } = compilePipeline(h, true)
-      result.before.push(...before)
-      result.after.push(...after)
-    } else if (typeof h === 'function') {
-      result.before.push(h)
-    } else {
-      h.fn && result.before.push(h.fn)
-      h.after && result.after.push(h.after)
-    }
-  }
-  if (guard) {
-    if (typeof guard === 'function') {
-      result.before.length > 0 && result.before.unshift(guard)
-    } else {
-      result.before.length > 0 && guard.fn && result.before.unshift(guard.fn)
-      result.after.length > 0 && guard.after && result.after.unshift(guard.after)
-    }
-  }
-  return result
-}
-
-export async function createHandle(): Promise<{
-  before: Handler[]
-  after: Handler[]
-}> {
-  const h = handles()
-  const pipeline: Pipeline = [
-    h.communicated(), // 已沟通过滤
-    h.SameCompanyFilter(), // 相同公司过滤
-    h.SameHrFilter(), // 相同hr过滤
-    h.jobTitle(), // 岗位名筛选
-    h.company(), // 公司名筛选
-    h.salaryRange(), // 薪资筛选
-    h.companySizeRange(), // 公司规模筛选
-    h.goldHunterFilter(), // 猎头过滤
-    [
-      // Card卡片信息获取
-      async (args) => {
-        if (args.data.card == null) {
-          if ((await args.data.getCard()) == null) {
-            throw new UnknownError('Card 信息获取失败')
-          }
-        }
-      },
-      h.activityFilter(), // 活跃度过滤
-      h.hrPosition(), // Hr职位筛选
-      h.jobAddress(), // 工作地址筛选
-      h.jobFriendStatus(), // 好友状态过滤
-      h.jobContent(), // 工作内容筛选
-      [
-        // 高德地图
-        async (args, ctx) => {
-          ctx.amap ??= {}
-          try {
-            ctx.amap.geocode = await amapGeocode(
-              args.data.card?.address ?? args.data.card?.jobInfo.address ?? '',
-            ) // TODO: 直接使用经纬度
-            if (!ctx.amap.geocode?.location) {
-              throw new JobAddressError('未获取到地址经纬度')
-            }
-            ctx.amap.distance = await amapDistance(ctx.amap.geocode.location)
-          } catch (e) {
-            logger.error('高德地图错误', e)
-            throw new JobAddressError(`错误: ${e instanceof Error ? e.message : '未知'}`)
-          }
-        },
-        h.amap(),
-      ],
-      h.aiFiltering(), // AI过滤
-      h.greeting(), // 招呼语
-    ],
-  ]
-  return compilePipeline(pipeline)
-}
 
 /**
  * 创建缓存实例
@@ -129,7 +34,7 @@ export function getCacheManager(): PipelineCacheManager {
  * 缓存Pipeline处理结果
  */
 export async function cachePipelineResult(
-  encryptJobId: string,
+  key: string,
   jobName: string,
   brandName: string,
   status: JobStatus,
@@ -137,25 +42,347 @@ export async function cachePipelineResult(
   processorType?: ProcessorType,
 ): Promise<void> {
   const cacheManager = getCacheManager()
-  await cacheManager.setCacheResult(
-    encryptJobId,
-    jobName,
-    brandName,
-    status,
-    message,
-    processorType,
-  )
+  await cacheManager.setCacheResult(key, jobName, brandName, status, message, processorType)
 }
 
 /**
  * 检查职位是否有有效缓存
  */
-export function checkJobCache(encryptJobId: string): PipelineCacheItem | null {
+export function checkJobCache(key: string): PipelineCacheItem | null {
   const cacheManager = getCacheManager()
 
-  if (cacheManager.isValidCache(encryptJobId)) {
-    const cached = cacheManager.getCachedResult(encryptJobId)
+  if (cacheManager.isValidCache(key)) {
+    const cached = cacheManager.getCachedResult(key)
     return cached
   }
   return null
+}
+
+export type DeliveryWorkflow<C extends HelperContext<C, T, S>, T, S> = Awaited<
+  ReturnType<typeof useDeliveryWorkflow<C, T, S>>
+>
+
+function meginResults(res: void | TaskResult | Array<TaskResult | void>): TaskResult | void {
+  if (!res) return {}
+  if (Array.isArray(res)) {
+    if (res.length === 0) return
+    return res.reduce((acc: TaskResult, r) => {
+      if (!r) return acc
+      let mergedStatus = acc.status
+      if (r.status) {
+        const accStatusIndex = jobStatusList.indexOf(acc.status as any) ?? -1
+        const rStatusIndex = jobStatusList.indexOf(r.status)
+        if (rStatusIndex > accStatusIndex) {
+          mergedStatus = r.status
+        }
+      }
+      return {
+        isSkip: acc.isSkip || r.isSkip,
+        reason: [acc.reason, r.reason].filter(Boolean).join('\n') || undefined,
+        status: mergedStatus,
+        msg: [acc.msg, r.msg].filter(Boolean).join('\n') || undefined,
+        isCache: acc.isCache || r.isCache,
+      }
+    }, res[0] ?? {})
+  }
+  return res
+}
+
+export async function useDeliveryWorkflow<C extends HelperContext<C, T, S>, T, S>(
+  items: Array<Task<C, T, S> | TaskPipeline<C, T, S> | (() => Task<C, T, S>)>,
+  helper: C,
+) {
+  const status = ref<'pending' | 'running' | 'stop' | 'error'>('pending')
+  const current = ref(0)
+  const total = computed(() => helper.jobList.value.length)
+  const errorMessage = ref<string | null>(null)
+  const pipeline = shallowRef<Task<C, T, S>[]>([])
+  const nodes = shallowRef<
+    Array<{
+      id: string
+      label: string
+      status: TaskStatus
+      deps: string[]
+      error?: any
+    }>
+  >([])
+  const stateMaps = ref(new Map<string, any>())
+  const resolvedHandlers = new Map<string, Handler<C, T, S>>()
+
+  const rebuild = async () => {
+    const _ctx: TaskContext<C, T, S> = { helper, now: new Date() }
+    const taskMap = new Map<string, Task<C, T, S>>()
+    const _resolvedHandlers = new Map<string, any>()
+    const errors = new Map<string, any>()
+
+    const rawTasks = items.flatMap((i) => (typeof i === 'function' ? { ...i() } : { ...i }))
+    const requiredIds = new Set<string>()
+    for (const task of rawTasks) {
+      try {
+        taskMap.set(task.id, task)
+        const result = await task.task(_ctx)
+        if (!result) continue
+
+        requiredIds.add(task.id)
+        task.deps.forEach((d) => requiredIds.add(d))
+
+        if (typeof result === 'function') {
+          _resolvedHandlers.set(task.id, result)
+        } else {
+          _resolvedHandlers.set(task.id, result.fn)
+          if (result.before) task.before.push(...result.before)
+          if (result.after) task.after.push(...result.after)
+        }
+      } catch (e) {
+        errors.set(task.id, e)
+      }
+    }
+
+    const _pipeline: Task<C, T, S>[] = []
+    const visited = new Set<string>()
+    const stack = new Set<string>()
+    const sort = (id: string) => {
+      if (stack.has(id)) throw new Error(`Cycle: ${id}`)
+      if (visited.has(id)) return
+      const t = taskMap.get(id)
+      if (!t || !requiredIds.has(id)) return
+      stack.add(id)
+      t.deps.forEach(sort)
+      stack.delete(id)
+      visited.add(id)
+      _pipeline.push(t)
+    }
+    Array.from(requiredIds).forEach(sort)
+
+    pipeline.value = _pipeline
+    resolvedHandlers.clear()
+    _resolvedHandlers.forEach((v, k) => resolvedHandlers.set(k, v))
+
+    nodes.value = rawTasks.map((t) => {
+      const isLastDefinition = taskMap.get(t.id)?.task === t.task
+      const isResolved = _resolvedHandlers.has(t.id)
+      const error = errors.get(t.id)
+      let nStatus: TaskStatus = 'disabled'
+      if (error) nStatus = 'failed'
+      else if (!isLastDefinition) nStatus = 'shadowed'
+      else if (isResolved) nStatus = 'active'
+      else if (requiredIds.has(t.id)) nStatus = 'dependency_only'
+
+      return {
+        id: t.id,
+        label: t.label || t.id,
+        status: nStatus,
+        deps: t.deps,
+        error,
+      }
+    })
+  }
+
+  const executeTask = async (task: Task<C, T, S>, data: WorkflowData<T, S>) => {
+    let res: TaskResult | void = undefined
+    const isStop = () => status.value === 'stop'
+    const handler = resolvedHandlers.get(task.id)
+    if (!handler || isStop()) return
+
+    const fns = [...task.before, handler, ...task.after]
+    for (const fn of fns) {
+      try {
+        res = meginResults(
+          await fn(
+            {
+              helper,
+              now: new Date(),
+            },
+            data,
+          ),
+        )
+        if (res?.isSkip || isStop()) break
+      } catch (e) {
+        if (e instanceof DependencyMissingError) {
+          const dep = resolvedHandlers.get(e.taskId)
+          if (dep) {
+            await dep(
+              {
+                helper,
+                now: new Date(),
+              },
+              data,
+            )
+            res = meginResults(
+              await fn(
+                {
+                  helper,
+                  now: new Date(),
+                },
+                data,
+              ),
+            )
+            if (res?.isSkip || isStop()) break
+            continue
+          }
+        }
+        throw e
+      }
+    }
+    return res
+  }
+
+  const execute = async (data: WorkflowData<T, S>) => {
+    const isStop = () => status.value === 'stop'
+    try {
+      let skipPipeline = false
+      for (const t of pipeline.value) {
+        let res: void | TaskResult = undefined
+        try {
+          if (isStop()) break
+          helper.jobResultMaps.set(data.jobData.key, {
+            status: t.state || 'running',
+            msg: t.stateMsg || '运行中',
+          })
+          res = await executeTask(t, data)
+          if (res != null) {
+            res.msg ??= t.label ?? t.id
+            res.status ??= res.isSkip ? 'warn' : undefined
+            if (res.isSkip) {
+              skipPipeline = true
+              break
+            }
+          }
+          if (isStop()) break
+        } catch (e) {
+          res = {
+            isSkip: true,
+            status: 'error',
+            reason: `任务${t.label ?? t.id}执行失败: ${e instanceof Error ? e.message : e}`,
+            msg: `报错/${t.label ?? t.id}`,
+          }
+          logger.error(`任务${t.label ?? t.id}执行失败`, e)
+          skipPipeline = true
+          break
+        } finally {
+          if (res != null) {
+            helper.jobResultMaps.set(data.jobData.key, {
+              ...(helper.jobResultMaps.get(data.jobData.key) ?? {}),
+              ...res,
+            })
+            if (res.status) {
+              helper.statistics.todayData.tasks[t.id] ??= {}
+              helper.statistics.todayData.tasks[t.id][res.status] ??= 0
+              helper.statistics.todayData.tasks[t.id][res.status] += 1
+            }
+          }
+        }
+      }
+      if (!skipPipeline) {
+        helper.jobResultMaps.set(data.jobData.key, {
+          status: 'success',
+          msg: '投递成功',
+        })
+      }
+    } catch (e) {
+      status.value = 'error'
+      throw e
+    }
+  }
+
+  const executeAll = async (rawDataMap: Map<string, T>) => {
+    await rebuild()
+
+    let stepMsg = ''
+    errorMessage.value = null
+    status.value = 'running'
+    const isStop = () => status.value === 'stop'
+
+    try {
+      while (status.value === 'running') {
+        if (helper.jobList.value.length === 0) {
+          stepMsg = '没有职位可投递'
+          break
+        }
+        helper.jobList.value.forEach((job) => {
+          const v = helper.jobResultMaps.get(job.key)
+          if (!v) {
+            helper.jobResultMaps.set(job.key, { status: 'wait', msg: '等待中' })
+            return
+          } else if (v.status === 'success' || v.status === 'warn') {
+            return
+          }
+          v.status = 'wait'
+          v.msg = '等待中'
+          helper.jobResultMaps.set(job.key, v)
+        })
+
+        await delay(helper.conf.formData.delay.deliveryStarts, isStop)
+
+        for (const [index, jobData] of helper.jobList.value.entries()) {
+          current.value = index + 1
+          if (isStop()) break
+          const status = helper.jobResultMaps.get(jobData.key)?.status
+          if (status === 'success' || status === 'warn') {
+            continue
+          }
+          const data = {
+            jobData,
+            rawData: rawDataMap.get(jobData.key)!,
+            state: stateMaps.value.get(jobData.key) || {},
+          }
+          helper.jobMaps.set(jobData.key, data)
+          helper.currentJob.value = jobData.key
+          await execute(data)
+          await delay(helper.conf.formData.delay.deliveryInterval, isStop)
+        }
+        if (isStop()) break
+        const hasMore = await helper.loadMoreJob(
+          delay(helper.conf.formData.delay.deliveryPageNext, isStop),
+        )
+        if (!hasMore) {
+          status.value = 'stop'
+          stepMsg = '投递结束, 无法继续下一页'
+          break
+        }
+      }
+    } catch (e) {
+      logger.error(e)
+      stepMsg = `未知错误: ${e}`
+    } finally {
+      if (!stepMsg) {
+        stepMsg = '投递结束'
+        status.value = 'pending'
+      } else if (status.value !== 'stop') {
+        status.value = 'error'
+        errorMessage.value = stepMsg
+      }
+      helper.notification(stepMsg)
+    }
+  }
+
+  const stop = () => (status.value = 'stop')
+  const reset = () => {
+    status.value = 'pending'
+    helper.jobList.value.forEach((job) => {
+      const v = helper.jobResultMaps.get(job.key)
+      if (!v || v.status === 'success') {
+        return
+      }
+      v.msg = '等待中'
+      v.status = 'wait'
+    })
+  }
+
+  return {
+    items,
+    status,
+    current,
+    total,
+    errorMessage,
+    pipeline,
+    nodes,
+    ctx: helper,
+    stateMaps,
+    rebuild,
+    execute,
+    executeAll,
+    stop,
+    reset,
+  }
 }

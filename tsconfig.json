@@ -2,6 +2,19 @@
   "extends": "./.wxt/tsconfig.json",
   "compilerOptions": {
     "jsx": "preserve",
-    "jsxImportSource": "vue"
+    "jsxImportSource": "vue",
+    "allowArbitraryExtensions": true,
+    "paths": {
+      "@": ["./src"],
+      "@/*": ["./src/*"],
+      "~": ["./src"],
+      "~/*": ["./src/*"],
+      "@@": ["."],
+      "@@/*": ["./*"],
+      "~~": ["."],
+      "~~/*": ["./*"],
+      "#build/ui": ["./node_modules/.nuxt-ui/ui"],
+      "#build/ui/*": ["./node_modules/.nuxt-ui/ui/*"]
+    }
   }
 }

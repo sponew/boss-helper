@@ -1,31 +1,23 @@
-import type { prompt } from '@/composables/useModel/type'
-
 export interface Statistics {
   date: string
   success: number
   total: number
-  company: number
-  jobTitle: number
-  jobContent: number
-  hrPosition: number
-  jobAddress: number
-  salaryRange: number
-  amap: number
-  companySizeRange: number
-  activityFilter: number
-  goldHunterFilter: number
   repeat: number
+  activityFilter: number
+  tasks: {
+    [key: string]: { [key: string]: number }
+  }
 }
 const ConfigLevels = ['beginner', 'intermediate', 'advanced', 'expert'] as const
 export type ConfigLevel = (typeof ConfigLevels)[number]
 
 export interface FormData {
-  config_level: ConfigLevel
+  configLevel: ConfigLevel
   company: FormDataSelect
   jobTitle: FormDataSelect
   jobContent: FormDataSelect
   hrPosition: FormDataSelect
-  jobAddress: Omit<FormDataSelect, 'include'>
+  jobAddress: FormDataSelect
   salaryRange: FormSalaryRangeInput
   companySizeRange: FormDataRangeInput
   customGreeting: FormDataInput
@@ -55,19 +47,18 @@ export interface FormData {
   // animation?: "frame" | "card" | "together";
   delay: ConfDelay
   version: string
-  userId?: number | string
 }
 
 export type FormInfoData = {
   [key in keyof Omit<
     FormData,
-    'config_level' | 'aiGreeting' | 'aiFiltering' | 'delay' | 'userId' | 'version' | 'amap'
+    'configLevel' | 'aiGreeting' | 'aiFiltering' | 'delay' | 'userId' | 'version' | 'amap'
   >]: {
     label: string
     'data-help'?: string
   }
 } & {
-  config_level: { options: Array<{ value: ConfigLevel; label: string }>; 'data-help'?: string }
+  configLevel: { options: Array<{ value: ConfigLevel; label: string }>; 'data-help'?: string }
   aiGreeting: FormInfoAi
   aiFiltering: FormInfoAi
   delay: ConfInfoDelay
@@ -82,7 +73,6 @@ export type FormInfoData = {
 export interface FormInfoAi {
   label: string
   'data-help'?: string
-  example: [string, prompt]
 }
 
 export interface FormDataSelect {
@@ -123,10 +113,14 @@ export interface FormDataCheckbox {
   value: boolean
 }
 
+export type Prompt = Array<{
+  role: 'system' | 'user' | 'assistant'
+  content: string
+}>
+
 export interface FormDataAi {
   model?: string
-  vip?: boolean
-  prompt: string | prompt
+  prompt: Prompt
   enable: boolean
 }
 

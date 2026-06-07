@@ -1,4 +1,4 @@
-import type { JobStatus } from '@/stores/jobs'
+import { JobStatus } from '@/composables/useApplying/type'
 
 /**
  * pipeline 处理分组类型
